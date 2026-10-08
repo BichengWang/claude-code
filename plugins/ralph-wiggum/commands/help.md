@@ -71,6 +71,21 @@ Cancel an active Ralph loop (removes the loop state file).
 
 ---
 
+### /ralph-status
+
+Show the status of the active Ralph loop (read-only).
+
+**Usage:**
+```
+/ralph-status
+```
+
+**How it works:**
+- Reads the loop state file
+- Reports the current iteration, iteration limit, completion promise and start time
+
+---
+
 ## Key Concepts
 
 ### Completion Promises

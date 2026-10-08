@@ -69,6 +69,15 @@ Cancel the active Ralph loop.
 /cancel-ralph
 ```
 
+### /ralph-status
+
+Show the current iteration, iteration limit, completion promise and start time of the active Ralph loop. Read-only.
+
+**Usage:**
+```bash
+/ralph-status
+```
+
 ## Prompt Writing Best Practices
 
 ### 1. Clear Completion Criteria
