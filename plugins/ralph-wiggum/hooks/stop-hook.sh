@@ -65,8 +65,9 @@ ralph_status_verdict() {
         end
       else . end
     )
-    | if .tagged and .expanded then "status"
-      elif (.tagged and .open) or ($hook_pid != "" and .pid != null and .pid != $hook_pid) then "pending"
+    | if $hook_pid != "" and .pid != null and .pid != $hook_pid then "pending"
+      elif .tagged and .expanded then "status"
+      elif .tagged and .open then "pending"
       else "no" end
   ' "$transcript_path" 2>/dev/null || echo no
 }

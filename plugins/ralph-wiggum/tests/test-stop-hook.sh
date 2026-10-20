@@ -382,6 +382,22 @@ PROMPT_ID=new run_hook "$WORK/t.jsonl"
 wait
 check "[status, current prompt not yet in transcript] bypassed" "[[ \$(sha \"\$(STATE)\") == $before && -z \"\$OUT\" && $RC -eq 0 ]]"
 
+# An old, complete status turn is on disk but the hook fires for a newer prompt whose entry has not landed
+new_case 2 10
+{ status_transcript /ralph-wiggum:ralph-status | sed 's/^{"type":"user"/{"type":"user","promptId":"old"/'; } > "$WORK/t.jsonl"
+start=$SECONDS
+PROMPT_ID=new run_hook "$WORK/t.jsonl"
+check "[old status turn, new prompt_id, no new entry] not bypassed" "[[ \$(iteration) == 3 && \$(echo \"\$OUT\" | jq -r .decision) == block ]]"
+
+# Same, but the new prompt's normal entries land during the wait
+new_case 2 10
+{ status_transcript /ralph-wiggum:ralph-status | sed 's/^{"type":"user"/{"type":"user","promptId":"old"/'; } > "$WORK/t.jsonl"
+{ cat "$WORK/t.jsonl"; user_prompt "Carry on" | sed 's/^{"type":"user"/{"type":"user","promptId":"new"/'; assistant_text "Continuing"; } > "$WORK/new.jsonl"
+( sleep 0.6; cp "$WORK/new.jsonl" "$WORK/t.jsonl" ) &
+PROMPT_ID=new run_hook "$WORK/t.jsonl"
+wait
+check "[old status turn, new normal prompt lands late] not bypassed" "[[ \$(iteration) == 3 ]]"
+
 # Matching prompt_id on a normal turn adds no waiting and no change in behaviour
 new_case 2 10
 { user_prompt "Build a thing" | sed 's/^{"type":"user"/{"type":"user","promptId":"p9"/'; assistant_text "Working"; } > "$WORK/t.jsonl"
