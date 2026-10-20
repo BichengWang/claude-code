@@ -170,6 +170,11 @@ if [[ -z "$LAST_OUTPUT" ]]; then
   echo "   Neither the hook input (last_assistant_message) nor the transcript" >&2
   echo "   (${TRANSCRIPT_PATH:-no transcript_path given}) contained it." >&2
   echo "   Leaving the loop state as is; the loop was not advanced for this turn." >&2
+  # stderr from a successful hook is not shown, so also tell the user through a
+  # non-blocking systemMessage (no "decision": the stop is allowed).
+  jq -n --arg file "$RALPH_STATE_FILE" '{
+    "systemMessage": ("⚠️ Ralph loop paused: could not read this turn'"'"'s reply, so the loop was not advanced. State kept in " + $file + ". Send a message to carry on, or run /cancel-ralph to end the loop.")
+  }'
   exit 0
 fi
 

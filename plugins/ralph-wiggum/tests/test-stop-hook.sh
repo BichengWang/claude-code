@@ -388,7 +388,7 @@ new_case 2 10
 { status_transcript /ralph-wiggum:ralph-status | sed 's/^{"type":"user"/{"type":"user","promptId":"old"/'; } > "$WORK/t.jsonl"
 start=$SECONDS
 PROMPT_ID=new run_hook "$WORK/t.jsonl"
-check "[old status turn, new prompt_id, no new entry] not bypassed; no reply for the new prompt, so the loop is left as is" "[[ \$(iteration) == 2 && -z \"\$OUT\" && \"\$ERR\" == *'Could not read this turn'* ]]"
+check "[old status turn, new prompt_id, no new entry] not bypassed; no reply for the new prompt, so the loop is left as is" "[[ \$(iteration) == 2 && \$(echo \"\$OUT\" | jq -r '.decision // \"none\"') == none && \"\$ERR\" == *'Could not read this turn'* ]]"
 
 # Same, but the new prompt's normal entries land during the wait
 new_case 2 10
@@ -431,7 +431,7 @@ check "[corrupted iteration, normal turn] deletes state, exit 0" "[[ $RC -eq 0 &
 
 new_case 2 10
 run_hook "$WORK/does-not-exist.jsonl"
-check "[missing transcript, no hook message] state kept, exit 0, no block, clear message" "[[ $RC -eq 0 && -f \"\$(STATE)\" && \$(iteration) == 2 && -z \"\$OUT\" && \"\$ERR\" == *'Could not read this turn'*'not advanced'* ]]"
+check "[missing transcript, no hook message] state kept, exit 0, no block, clear message" "[[ $RC -eq 0 && -f \"\$(STATE)\" && \$(iteration) == 2 && \$(echo \"\$OUT\" | jq -r '.decision // \"none\"') == none && \$(echo \"\$OUT\" | jq -r .systemMessage) == *'/cancel-ralph'* && \"\$ERR\" == *'Could not read this turn'*'not advanced'* ]]"
 
 new_case 2 0
 { user_prompt "Build a thing"; assistant_text "Working"; } > "$WORK/t.jsonl"
@@ -449,8 +449,9 @@ echo "# a missing reply never ends or advances the loop"
 # missing_reply_case DESC: transcript already in $WORK/t.jsonl; no reply anywhere
 missing_reply_check() {
   local desc="$1" before="$2"
-  check "[$desc] state kept byte-identical, exit 0, no block" "[[ -f \"\$(STATE)\" && \$(sha \"\$(STATE)\") == $before && $RC -eq 0 && -z \"\$OUT\" ]]"
+  check "[$desc] state kept byte-identical, exit 0, no block decision" "[[ -f \"\$(STATE)\" && \$(sha \"\$(STATE)\") == $before && $RC -eq 0 && \$(echo \"\$OUT\" | jq -r '.decision // \"none\"') == none ]]"
   check "[$desc] says why on stderr" "[[ \"\$ERR\" == *'Could not read this turn'* ]]"
+  check "[$desc] prints a non-blocking systemMessage naming the state file and /cancel-ralph" "[[ \$(echo \"\$OUT\" | jq -e '(keys == [\"systemMessage\"]) and (.systemMessage | contains(\".claude/ralph-loop.local.md\") and contains(\"/cancel-ralph\"))' 2>&1) == true ]]"
 }
 
 new_case 2 10
