@@ -123,60 +123,58 @@ if [[ $MAX_ITERATIONS -gt 0 ]] && [[ $ITERATION -ge $MAX_ITERATIONS ]]; then
   exit 0
 fi
 
-# Get transcript path from hook input
-TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path')
+# Find the reply of the turn being stopped. Claude Code passes the final
+# assistant text in the hook input (`last_assistant_message`); the transcript
+# is written asynchronously and can lag behind, so it is only the fallback.
+TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty')
+PROMPT_ID=$(echo "$HOOK_INPUT" | jq -r '.prompt_id // empty')
 
-if [[ ! -f "$TRANSCRIPT_PATH" ]]; then
-  echo "⚠️  Ralph loop: Transcript file not found" >&2
-  echo "   Expected: $TRANSCRIPT_PATH" >&2
-  echo "   This is unusual and may indicate a Claude Code internal issue." >&2
-  echo "   Ralph loop is stopping." >&2
-  rm "$RALPH_STATE_FILE"
-  exit 0
-fi
+# Print the text of the last assistant entry in the transcript, or nothing when
+# that entry is not available yet (no file, no assistant entry, last entry has
+# no text such as a tool_use, or - when the hook gave a prompt_id - the entry is
+# not newer than that prompt's last user entry, i.e. it belongs to an earlier turn).
+transcript_reply() {
+  [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]] || return 0
+  jq -r -R -n --arg pid "$PROMPT_ID" '
+    [inputs | fromjson? | select(type == "object" and .isSidechain != true)] as $e
+    | ($e | map(.type == "assistant") | rindex(true)) as $a
+    | (if $pid == "" then -1
+       else ($e | map(.type == "user" and .promptId == $pid) | rindex(true)) end) as $u
+    | if $a == null or $u == null or $a <= $u then empty
+      else $e[$a].message.content
+        | if type == "string" then .
+          elif type == "array" then map(select((.type? // "") == "text") | .text) | join("\n")
+          else "" end
+      end
+  ' "$TRANSCRIPT_PATH" 2>/dev/null || true
+}
 
-# Read last assistant message from transcript (JSONL format - one JSON per line)
-# First check if there are any assistant messages
-if ! grep -q '"role":"assistant"' "$TRANSCRIPT_PATH"; then
-  echo "⚠️  Ralph loop: No assistant messages found in transcript" >&2
-  echo "   Transcript: $TRANSCRIPT_PATH" >&2
-  echo "   This is unusual and may indicate a transcript format issue" >&2
-  echo "   Ralph loop is stopping." >&2
-  rm "$RALPH_STATE_FILE"
-  exit 0
-fi
+find_reply() {
+  LAST_OUTPUT=$(echo "$HOOK_INPUT" | jq -r '.last_assistant_message | if type == "string" then . else empty end' 2>/dev/null || true)
+  [[ -n "$LAST_OUTPUT" ]] && return 0
+  LAST_OUTPUT=$(transcript_reply)
+  [[ -n "$LAST_OUTPUT" ]]
+}
 
-# Extract last assistant message with explicit error handling
-LAST_LINE=$(grep '"role":"assistant"' "$TRANSCRIPT_PATH" | tail -1)
-if [[ -z "$LAST_LINE" ]]; then
-  echo "⚠️  Ralph loop: Failed to extract last assistant message" >&2
-  echo "   Ralph loop is stopping." >&2
-  rm "$RALPH_STATE_FILE"
-  exit 0
-fi
-
-# Parse JSON with error handling
-LAST_OUTPUT=$(echo "$LAST_LINE" | jq -r '
-  .message.content |
-  map(select(.type == "text")) |
-  map(.text) |
-  join("\n")
-' 2>&1)
-
-# Check if jq succeeded
-if [[ $? -ne 0 ]]; then
-  echo "⚠️  Ralph loop: Failed to parse assistant message JSON" >&2
-  echo "   Error: $LAST_OUTPUT" >&2
-  echo "   This may indicate a transcript format issue" >&2
-  echo "   Ralph loop is stopping." >&2
-  rm "$RALPH_STATE_FILE"
-  exit 0
-fi
+# The reply may simply not have landed yet: wait up to ~2 seconds for it.
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  find_reply && break
+  sleep 0.2
+done
 
 if [[ -z "$LAST_OUTPUT" ]]; then
-  echo "⚠️  Ralph loop: Assistant message contained no text content" >&2
-  echo "   Ralph loop is stopping." >&2
-  rm "$RALPH_STATE_FILE"
+  # Without the reply the completion promise cannot be judged either way. That
+  # is no reason to end the loop, so leave the state untouched and let this stop
+  # through without advancing the iteration.
+  echo "⚠️  Ralph loop: Could not read this turn's assistant reply" >&2
+  echo "   Neither the hook input (last_assistant_message) nor the transcript" >&2
+  echo "   (${TRANSCRIPT_PATH:-no transcript_path given}) contained it." >&2
+  echo "   Leaving the loop state as is; the loop was not advanced for this turn." >&2
+  # stderr from a successful hook is not shown, so also tell the user through a
+  # non-blocking systemMessage (no "decision": the stop is allowed).
+  jq -n --arg file "$RALPH_STATE_FILE" '{
+    "systemMessage": ("⚠️ Ralph loop paused: could not read this turn'"'"'s reply, so the loop was not advanced. State kept in " + $file + ". Send a message to carry on, or run /cancel-ralph to end the loop.")
+  }'
   exit 0
 fi
 

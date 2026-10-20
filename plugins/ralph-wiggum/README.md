@@ -26,6 +26,8 @@ This plugin implements Ralph using a **Stop hook** that intercepts Claude's exit
 
 The loop happens **inside your current session** - you don't need external bash loops. The Stop hook in `hooks/stop-hook.sh` creates the self-referential feedback loop by blocking normal session exit.
 
+The hook reads Claude's final reply from the `last_assistant_message` field of the Stop hook input (falling back to the session transcript when the field is absent or empty) to check for the completion promise. If the reply is not available yet, it waits up to about two seconds; if it still is not, the hook leaves the loop state untouched and lets that stop through without advancing the iteration, rather than ending the loop. It also prints a non-blocking `systemMessage` naming the state file and pointing to `/cancel-ralph`. This wait can stack with the `/ralph-status` transcript check (also up to about two seconds), so the worst case is about four seconds.
+
 This creates a **self-referential feedback loop** where:
 - The prompt never changes between iterations
 - Claude's previous work persists in files
