@@ -39,6 +39,12 @@ tool_result() { jq -nc '{type:"user",message:{role:"user",content:[{type:"tool_r
 assistant_tool_use() { jq -nc '{type:"assistant",message:{role:"assistant",content:[{type:"tool_use",id:"t1",name:"Bash",input:{command:"true"}}]}}'; }
 assistant_text() { jq -nc --arg t "$1" '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:$t}]}}'; }
 
+# Start of the expanded body of commands/ralph-status.md, as recorded in the hidden entry
+STATUS_BODY="<!-- ralph-status: read-only -->
+# Ralph Status
+
+To show the status of the Ralph loop: ..."
+
 status_command() {
   printf '<command-message>%s</command-message>\n<command-name>%s</command-name>' "$1" "$2"
 }
@@ -48,7 +54,7 @@ status_transcript() {
   local msg="${1#/}"
   {
     user_prompt "$(status_command "$msg" "$1")"
-    meta_user "# Ralph Status ... Do not modify the file or continue the loop."
+    meta_user "$STATUS_BODY"
     assistant_tool_use
     tool_result
     assistant_tool_use
@@ -84,7 +90,7 @@ EOF
 # run_hook TRANSCRIPT_FILE: runs the hook in $PROJ; sets OUT, ERR, RC
 run_hook() {
   local input
-  input=$(jq -nc --arg p "$1" '{session_id:"s1",transcript_path:$p,cwd:"/x",hook_event_name:"Stop",stop_hook_active:false,last_assistant_message:"x"}')
+  input=$(jq -nc --arg p "$1" --arg pid "${PROMPT_ID:-}" '{session_id:"s1",transcript_path:$p,cwd:"/x",hook_event_name:"Stop",stop_hook_active:false,last_assistant_message:"x"} + (if $pid == "" then {} else {prompt_id:$pid} end)')
   OUT=$(cd "$PROJ" && echo "$input" | bash "$HOOK" 2>"$WORK/err")
   RC=$?
   ERR=$(cat "$WORK/err")
@@ -114,7 +120,7 @@ new_case 2 10
 {
   user_prompt "$(status_command ralph-wiggum:ralph-status /ralph-wiggum:ralph-status)
 <command-args></command-args>"
-  meta_user "# Ralph Status"
+  meta_user "$STATUS_BODY"
   assistant_text "The Ralph loop is active."
 } > "$WORK/t.jsonl"
 before=$(sha "$(STATE)")
@@ -132,7 +138,7 @@ check "[status at max_iterations] state file kept, byte-identical" "[[ -f \"\$(S
 new_case 2 10
 {
   user_prompt "$(status_command ralph-wiggum:ralph-status /ralph-wiggum:ralph-status)"
-  meta_user "# Ralph Status"
+  meta_user "$STATUS_BODY"
   assistant_tool_use
   tool_result
   assistant_tool_use
@@ -234,6 +240,154 @@ new_case 2 10
 } > "$WORK/t.jsonl"
 run_hook "$WORK/t.jsonl"
 check "[same command name from another plugin] not bypassed" "[[ \$(iteration) == 3 ]]"
+
+echo "# look-alike prompts are not status turns"
+
+PASTED_TAGS="$(status_command ralph-wiggum:ralph-status /ralph-wiggum:ralph-status)
+Build a thing"
+
+# Ordinary prompt that begins with the command tags, no hidden expansion
+new_case 2 10
+{
+  user_prompt "$PASTED_TAGS"
+  assistant_text "Working on it"
+} > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[pasted tags, no expansion] blocks and increments" "[[ \$(echo \"\$OUT\" | jq -r .decision) == block && \$(iteration) == 3 ]]"
+
+# Same, with tool use in the turn
+new_case 2 10
+{
+  user_prompt "$PASTED_TAGS"
+  assistant_tool_use
+  tool_result
+  assistant_text "Done"
+} > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[pasted tags, tool use, no expansion] blocks and increments" "[[ \$(echo \"\$OUT\" | jq -r .decision) == block && \$(iteration) == 3 ]]"
+
+# Pasted tags followed by the hidden expansion of a different command
+new_case 2 10
+{
+  user_prompt "$PASTED_TAGS"
+  meta_user "# Ralph Loop Command ..."
+  assistant_text "Working on it"
+} > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[pasted tags + other command's expansion] blocks and increments" "[[ \$(echo \"\$OUT\" | jq -r .decision) == block && \$(iteration) == 3 ]]"
+
+# Pasted tags and the sentinel typed into the prompt itself (not a hidden entry)
+new_case 2 10
+{
+  user_prompt "$PASTED_TAGS
+$STATUS_BODY"
+  assistant_text "Working on it"
+} > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[pasted tags + sentinel inside the prompt] blocks and increments" "[[ \$(iteration) == 3 ]]"
+
+# Pasted tags and sentinel in the prompt; the loop's own hook feedback (hidden) repeats them
+new_case 2 10
+{
+  user_prompt "$PASTED_TAGS
+$STATUS_BODY"
+  assistant_text "Round 1"
+  meta_user "Stop hook feedback:
+$PASTED_TAGS
+$STATUS_BODY"
+  assistant_text "Round 2"
+} > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[pasted tags, hook feedback repeating the sentinel] blocks and increments" "[[ \$(iteration) == 3 ]]"
+
+# Hidden status expansion that belongs to a different prompt than the tagged entry
+new_case 2 10
+{
+  jq -nc --arg c "$PASTED_TAGS" '{type:"user",promptId:"p1",message:{role:"user",content:$c}}'
+  jq -nc --arg c "$STATUS_BODY" '{type:"user",isMeta:true,promptId:"p2",message:{role:"user",content:[{type:"text",text:$c}]}}'
+  assistant_text "Working on it"
+} > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[expansion from a different promptId] blocks and increments" "[[ \$(iteration) == 3 ]]"
+
+# Assistant output between the tagged entry and the expansion
+new_case 2 10
+{
+  user_prompt "$PASTED_TAGS"
+  assistant_text "Working on it"
+  meta_user "$STATUS_BODY"
+  assistant_text "More"
+} > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[assistant output between tags and expansion] blocks and increments" "[[ \$(iteration) == 3 ]]"
+
+# Only the hidden expansion, no tagged prompt before it
+new_case 2 10
+{
+  user_prompt "Build a thing"
+  meta_user "$STATUS_BODY"
+  assistant_text "Working on it"
+} > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[expansion without tagged prompt] blocks and increments" "[[ \$(iteration) == 3 ]]"
+
+echo "# genuine status turns, with promptId, sidechains and unusual entries"
+
+new_case 2 10
+{
+  jq -nc --arg c "$(status_command ralph-wiggum:ralph-status /ralph-wiggum:ralph-status)" '{type:"user",promptId:"p1",message:{role:"user",content:$c}}'
+  jq -nc --arg c "$STATUS_BODY" '{type:"user",isMeta:true,promptId:"p1",message:{role:"user",content:[{type:"text",text:$c}]}}'
+  jq -nc '{type:"attachment",attachment:{type:"date"}}'
+  assistant_tool_use
+  tool_result
+  jq -nc '{type:"user",isSidechain:true,message:{role:"user",content:"sub task prompt"}}'
+  jq -nc '{type:"assistant",isSidechain:true,message:{role:"assistant",content:[{type:"text",text:"sub"}]}}'
+  assistant_tool_use
+  tool_result
+  assistant_text "The Ralph loop is active."
+} > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+run_hook "$WORK/t.jsonl"
+check "[status with promptId, tool results, sidechain] bypassed" "[[ \$(sha \"\$(STATE)\") == $before && -z \"\$OUT\" && $RC -eq 0 ]]"
+
+new_case 2 10
+{
+  jq -nc '{type:"attachment"}'
+  echo 'not json'
+  status_transcript /ralph-wiggum:ralph-status
+} > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+run_hook "$WORK/t.jsonl"
+check "[status with a malformed line in the transcript] bypassed" "[[ \$(sha \"\$(STATE)\") == $before && -z \"\$OUT\" && $RC -eq 0 ]]"
+
+echo "# a lagging transcript is re-checked before deciding"
+
+# Only the tagged entry is on disk when the hook starts; the rest lands 0.6s later
+new_case 2 10
+status_transcript /ralph-wiggum:ralph-status > "$WORK/full.jsonl"
+head -1 "$WORK/full.jsonl" > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+( sleep 0.6; cp "$WORK/full.jsonl" "$WORK/t.jsonl" ) &
+run_hook "$WORK/t.jsonl"
+wait
+check "[status, expansion lands late] bypassed" "[[ \$(sha \"\$(STATE)\") == $before && -z \"\$OUT\" && $RC -eq 0 ]]"
+
+# The transcript still shows the previous prompt when the hook starts
+new_case 2 10
+{ user_prompt "Earlier prompt"; assistant_text "Earlier answer"; } | sed 's/^{"type":"user"/{"type":"user","promptId":"old"/' > "$WORK/t.jsonl"
+{ status_transcript /ralph-wiggum:ralph-status | sed 's/^{"type":"user"/{"type":"user","promptId":"new"/'; } > "$WORK/new.jsonl"
+before=$(sha "$(STATE)")
+( sleep 0.6; cp "$WORK/new.jsonl" "$WORK/t.jsonl" ) &
+PROMPT_ID=new run_hook "$WORK/t.jsonl"
+wait
+check "[status, current prompt not yet in transcript] bypassed" "[[ \$(sha \"\$(STATE)\") == $before && -z \"\$OUT\" && $RC -eq 0 ]]"
+
+# Matching prompt_id on a normal turn adds no waiting and no change in behaviour
+new_case 2 10
+{ user_prompt "Build a thing" | sed 's/^{"type":"user"/{"type":"user","promptId":"p9"/'; assistant_text "Working"; } > "$WORK/t.jsonl"
+start=$SECONDS
+PROMPT_ID=p9 run_hook "$WORK/t.jsonl"
+check "[normal turn with matching prompt_id] blocks and increments without waiting" "[[ \$(iteration) == 3 && \$((SECONDS - start)) -lt 2 ]]"
 
 echo "# termination paths are unchanged"
 

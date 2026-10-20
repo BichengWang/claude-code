@@ -73,7 +73,7 @@ Cancel the active Ralph loop.
 
 Show the current iteration, iteration limit, completion promise and start time of the active Ralph loop. Read-only.
 
-The Stop hook recognizes the turn that ran `/ralph-status` (from the slash command recorded in the session transcript) and lets it end without advancing, finishing, or deleting the loop. The loop resumes on the next turn that is not a `/ralph-status` invocation.
+The Stop hook recognizes the turn that ran `/ralph-status` and lets it end without advancing, finishing, or deleting the loop. It requires the transcript to show the real command invocation followed by the command's expanded body (which starts with the `<!-- ralph-status: read-only -->` comment in `commands/ralph-status.md`), so a prompt that merely contains the command tags does not count. Keep that comment as the first line of the command body. The loop resumes on the next turn that is not a `/ralph-status` invocation.
 
 **Usage:**
 ```bash

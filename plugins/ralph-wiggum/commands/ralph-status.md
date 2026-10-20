@@ -4,6 +4,7 @@ allowed-tools: ["Bash(test -f .claude/ralph-loop.local.md:*)", "Read(.claude/ral
 hide-from-slash-command-tool: "true"
 ---
 
+<!-- ralph-status: read-only -->
 # Ralph Status
 
 To show the status of the Ralph loop:
