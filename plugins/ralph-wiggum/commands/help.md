@@ -83,6 +83,7 @@ Show the status of the active Ralph loop (read-only).
 **How it works:**
 - Reads the loop state file
 - Reports the current iteration, iteration limit, completion promise and start time
+- The Stop hook skips the turn that ran `/ralph-status`, so inspecting a loop never advances or ends it
 
 ---
 

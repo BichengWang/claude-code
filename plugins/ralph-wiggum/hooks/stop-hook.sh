@@ -17,6 +17,37 @@ if [[ ! -f "$RALPH_STATE_FILE" ]]; then
   exit 0
 fi
 
+# /ralph-status is a read-only inspection command. The turn that runs it must
+# not advance, terminate, or otherwise touch the loop, so leave the state file
+# alone and let the session stop. The turn is identified from the transcript:
+# the last real user prompt (not a tool result, not hook feedback, not a
+# command's expanded body) is the slash command invocation, which Claude Code
+# records as
+#   <command-message>...</command-message>
+#   <command-name>/ralph-status</command-name>
+# with an optional "ralph-wiggum:" plugin namespace on the name.
+is_ralph_status_turn() {
+  local transcript_path last_prompt_is_status
+  transcript_path=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null) || return 1
+  [[ -n "$transcript_path" && -f "$transcript_path" ]] || return 1
+  last_prompt_is_status=$(jq -c '
+    select(
+      (.type? // "") == "user" and .isMeta != true and .isSidechain != true
+      and ((.message.content | type) == "string"
+           or ((.message.content | type) == "array"
+               and all(.message.content[]; (.type? // "") != "tool_result")))
+    )
+    | .message.content
+    | if type == "string" then . else map(select((.type? // "") == "text") | .text) | join("\n") end
+    | test("^<command-message>[^<]*</command-message>\\s*<command-name>/(ralph-wiggum:)?ralph-status</command-name>")
+  ' "$transcript_path" 2>/dev/null | tail -1) || return 1
+  [[ "$last_prompt_is_status" == "true" ]]
+}
+
+if is_ralph_status_turn; then
+  exit 0
+fi
+
 # Parse markdown frontmatter (YAML between ---) and extract values
 FRONTMATTER=$(sed -n '/^---$/,/^---$/{ /^---$/d; p; }' "$RALPH_STATE_FILE")
 ITERATION=$(echo "$FRONTMATTER" | grep '^iteration:' | sed 's/iteration: *//')
