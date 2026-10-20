@@ -17,6 +17,75 @@ if [[ ! -f "$RALPH_STATE_FILE" ]]; then
   exit 0
 fi
 
+# /ralph-status is a read-only inspection command. The turn that runs it must
+# not advance, terminate, or otherwise touch the loop, so leave the state file
+# alone and let the session stop.
+#
+# Typing text that looks like the command tags is not enough: a real invocation
+# is recorded in the transcript as two consecutive entries of the same prompt,
+#   1. a user entry with the tags
+#        <command-message>...</command-message>
+#        <command-name>/ralph-status</command-name>
+#      (optionally namespaced as /ralph-wiggum:ralph-status), and
+#   2. a hidden (isMeta) user entry holding the expanded command body, which
+#      starts with the sentinel comment from commands/ralph-status.md.
+# Users cannot create hidden entries, so both must be present, with nothing
+# (assistant output, tool results) in between. The turn is judged by the last
+# real user prompt, ignoring tool results, hook feedback and sidechains.
+#
+# The transcript is written asynchronously and can lag behind the session, so a
+# verdict of "pending" (tagged prompt with nothing after it yet, or the current
+# prompt_id not in the transcript yet) is re-checked for up to ~2 seconds.
+ralph_status_verdict() {
+  local transcript_path prompt_id
+  transcript_path=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null) || return 1
+  prompt_id=$(echo "$HOOK_INPUT" | jq -r '.prompt_id // empty' 2>/dev/null) || prompt_id=""
+  [[ -n "$transcript_path" && -f "$transcript_path" ]] || { echo no; return 0; }
+  jq -r -R -n --arg hook_pid "$prompt_id" '
+    def text: .message.content
+      | if type == "string" then .
+        elif type == "array" then map(select((.type? // "") == "text") | .text) | join("\n")
+        else "" end;
+    reduce (inputs | fromjson? | select(type == "object")) as $e (
+      {open: false, tagged: false, expanded: false, pid: null};
+      if $e.isSidechain == true then .
+      elif $e.type == "assistant" then .open = false
+      elif $e.type == "user" then
+        if $e.isMeta == true then
+          if .open and .tagged
+             and (.pid == null or $e.promptId == null or .pid == $e.promptId)
+             and ($e | text | test("^<!-- ralph-status: read-only -->"))
+          then .expanded = true | .open = false
+          else .open = false end
+        elif (($e.message.content | type) == "array"
+              and any($e.message.content[]; (.type? // "") == "tool_result")) then .open = false
+        else
+          {open: true, expanded: false, pid: $e.promptId,
+           tagged: ($e | text | test("^<command-message>[^<]*</command-message>\\s*<command-name>/(ralph-wiggum:)?ralph-status</command-name>"))}
+        end
+      else . end
+    )
+    | if $hook_pid != "" and .pid != null and .pid != $hook_pid then "pending"
+      elif .tagged and .expanded then "status"
+      elif .tagged and .open then "pending"
+      else "no" end
+  ' "$transcript_path" 2>/dev/null || echo no
+}
+
+is_ralph_status_turn() {
+  local verdict attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    verdict=$(ralph_status_verdict)
+    [[ "$verdict" == "pending" ]] || break
+    sleep 0.2
+  done
+  [[ "$verdict" == "status" ]]
+}
+
+if is_ralph_status_turn; then
+  exit 0
+fi
+
 # Parse markdown frontmatter (YAML between ---) and extract values
 FRONTMATTER=$(sed -n '/^---$/,/^---$/{ /^---$/d; p; }' "$RALPH_STATE_FILE")
 ITERATION=$(echo "$FRONTMATTER" | grep '^iteration:' | sed 's/iteration: *//')
