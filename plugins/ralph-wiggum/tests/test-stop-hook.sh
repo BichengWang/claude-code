@@ -90,7 +90,8 @@ EOF
 # run_hook TRANSCRIPT_FILE: runs the hook in $PROJ; sets OUT, ERR, RC
 run_hook() {
   local input
-  input=$(jq -nc --arg p "$1" --arg pid "${PROMPT_ID:-}" '{session_id:"s1",transcript_path:$p,cwd:"/x",hook_event_name:"Stop",stop_hook_active:false,last_assistant_message:"x"} + (if $pid == "" then {} else {prompt_id:$pid} end)')
+  # PROMPT_ID and LAST_MSG are optional; unset means the field is absent from the hook input
+  input=$(jq -nc --arg p "$1" --arg pid "${PROMPT_ID:-}" --arg msg "${LAST_MSG-__absent__}" '{session_id:"s1",transcript_path:$p,cwd:"/x",hook_event_name:"Stop",stop_hook_active:false} + (if $pid == "" then {} else {prompt_id:$pid} end) + (if $msg == "__absent__" then {} else {last_assistant_message:$msg} end)')
   OUT=$(cd "$PROJ" && echo "$input" | bash "$HOOK" 2>"$WORK/err")
   RC=$?
   ERR=$(cat "$WORK/err")
@@ -387,7 +388,7 @@ new_case 2 10
 { status_transcript /ralph-wiggum:ralph-status | sed 's/^{"type":"user"/{"type":"user","promptId":"old"/'; } > "$WORK/t.jsonl"
 start=$SECONDS
 PROMPT_ID=new run_hook "$WORK/t.jsonl"
-check "[old status turn, new prompt_id, no new entry] not bypassed" "[[ \$(iteration) == 3 && \$(echo \"\$OUT\" | jq -r .decision) == block ]]"
+check "[old status turn, new prompt_id, no new entry] not bypassed; no reply for the new prompt, so the loop is left as is" "[[ \$(iteration) == 2 && -z \"\$OUT\" && \"\$ERR\" == *'Could not read this turn'* ]]"
 
 # Same, but the new prompt's normal entries land during the wait
 new_case 2 10
@@ -429,13 +430,8 @@ run_hook "$WORK/t.jsonl"
 check "[corrupted iteration, normal turn] deletes state, exit 0" "[[ $RC -eq 0 && ! -e \"\$(STATE)\" && \"\$ERR\" == *'State file corrupted'* ]]"
 
 new_case 2 10
-{ user_prompt "Build a thing"; assistant_tool_use; } > "$WORK/t.jsonl"
-run_hook "$WORK/t.jsonl"
-check "[no assistant text, normal turn] deletes state, exit 0" "[[ $RC -eq 0 && ! -e \"\$(STATE)\" && \"\$ERR\" == *'contained no text content'* ]]"
-
-new_case 2 10
 run_hook "$WORK/does-not-exist.jsonl"
-check "[missing transcript] deletes state, exit 0" "[[ $RC -eq 0 && ! -e \"\$(STATE)\" && \"\$ERR\" == *'Transcript file not found'* ]]"
+check "[missing transcript, no hook message] state kept, exit 0, no block, clear message" "[[ $RC -eq 0 && -f \"\$(STATE)\" && \$(iteration) == 2 && -z \"\$OUT\" && \"\$ERR\" == *'Could not read this turn'*'not advanced'* ]]"
 
 new_case 2 0
 { user_prompt "Build a thing"; assistant_text "Working"; } > "$WORK/t.jsonl"
@@ -447,6 +443,123 @@ rm "$(STATE)"
 status_transcript /ralph-wiggum:ralph-status > "$WORK/t.jsonl"
 run_hook "$WORK/t.jsonl"
 check "[no active loop] exits 0 silently" "[[ $RC -eq 0 && -z \"\$OUT\" && -z \"\$ERR\" ]]"
+
+echo "# a missing reply never ends or advances the loop"
+
+# missing_reply_case DESC: transcript already in $WORK/t.jsonl; no reply anywhere
+missing_reply_check() {
+  local desc="$1" before="$2"
+  check "[$desc] state kept byte-identical, exit 0, no block" "[[ -f \"\$(STATE)\" && \$(sha \"\$(STATE)\") == $before && $RC -eq 0 && -z \"\$OUT\" ]]"
+  check "[$desc] says why on stderr" "[[ \"\$ERR\" == *'Could not read this turn'* ]]"
+}
+
+new_case 2 10
+{ user_prompt "Build a thing"; assistant_tool_use; } > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+run_hook "$WORK/t.jsonl"
+missing_reply_check "last entry is tool_use only" "$before"
+
+new_case 2 10
+{ user_prompt "Build a thing"; assistant_text "Let me check"; assistant_tool_use; tool_result; assistant_tool_use; } > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+run_hook "$WORK/t.jsonl"
+missing_reply_check "earlier text but tool_use is the last entry" "$before"
+
+new_case 2 10
+{ user_prompt "Build a thing"; } > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+run_hook "$WORK/t.jsonl"
+missing_reply_check "no assistant entry" "$before"
+
+new_case 2 10
+: > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+run_hook "$WORK/t.jsonl"
+missing_reply_check "empty transcript" "$before"
+
+new_case 2 10
+{ user_prompt "Build a thing"; assistant_text "Working"; echo '{"type":"assistant","message":{"role":"assista'; } > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[partially written last line] ignored, previous complete entry used" "[[ \$(iteration) == 3 && \$(echo \"\$OUT\" | jq -r .decision) == block ]]"
+
+new_case 2 10
+{ user_prompt "Build a thing" | sed 's/^{"type":"user"/{"type":"user","promptId":"old"/'; assistant_text "Previous turn's reply"; } > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+PROMPT_ID=new run_hook "$WORK/t.jsonl"
+missing_reply_check "transcript only has the previous turn's reply (prompt_id not in it)" "$before"
+
+new_case 2 10
+{ user_prompt "Old" | sed 's/^{"type":"user"/{"type":"user","promptId":"old"/'; assistant_text "Old reply <promise>DONE</promise>"; user_prompt "New" | sed 's/^{"type":"user"/{"type":"user","promptId":"new"/'; assistant_tool_use; } > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+PROMPT_ID=new run_hook "$WORK/t.jsonl"
+missing_reply_check "new prompt present, only an earlier turn's promise on disk" "$before"
+
+new_case 2 10
+{ user_prompt "Build a thing"; assistant_tool_use; } > "$WORK/t.jsonl"
+before=$(sha "$(STATE)")
+LAST_MSG="" run_hook "$WORK/t.jsonl"
+missing_reply_check "empty last_assistant_message and no transcript reply" "$before"
+
+echo "# last_assistant_message is the primary source, the transcript the fallback"
+
+new_case 2 10
+{ user_prompt "Build a thing"; assistant_tool_use; } > "$WORK/t.jsonl"
+LAST_MSG="Working" run_hook "$WORK/t.jsonl"
+check "[hook message, transcript has no reply] continues without waiting" "[[ \$(iteration) == 3 && \$(echo \"\$OUT\" | jq -r .decision) == block ]]"
+
+new_case 2 10
+LAST_MSG="Working" run_hook "$WORK/does-not-exist.jsonl"
+check "[hook message, no transcript file] continues" "[[ \$(iteration) == 3 && \$(echo \"\$OUT\" | jq -r .decision) == block ]]"
+
+new_case 2 10
+{ user_prompt "Build a thing"; assistant_tool_use; } > "$WORK/t.jsonl"
+LAST_MSG="All done <promise>DONE</promise>" run_hook "$WORK/t.jsonl"
+check "[promise in hook message only] completes, deletes state" "[[ $RC -eq 0 && ! -e \"\$(STATE)\" && \"\$OUT\" == *'Detected <promise>DONE</promise>'* ]]"
+
+new_case 2 10
+{ user_prompt "Build a thing"; assistant_text "All done <promise>DONE</promise>"; } > "$WORK/t.jsonl"
+LAST_MSG="Not finished yet" run_hook "$WORK/t.jsonl"
+check "[hook message wins over transcript] no promise -> continues" "[[ \$(iteration) == 3 && \$(echo \"\$OUT\" | jq -r .decision) == block ]]"
+
+new_case 2 10
+{ user_prompt "Build a thing"; assistant_text "All done <promise>DONE</promise>"; } > "$WORK/t.jsonl"
+run_hook "$WORK/t.jsonl"
+check "[hook message absent] falls back to the transcript promise" "[[ $RC -eq 0 && ! -e \"\$(STATE)\" && \"\$OUT\" == *'Detected'* ]]"
+
+new_case 10 10
+LAST_MSG="" run_hook "$WORK/does-not-exist.jsonl"
+check "[max iterations, no reply anywhere] still terminates and deletes" "[[ $RC -eq 0 && ! -e \"\$(STATE)\" && \"\$OUT\" == *'Max iterations'* ]]"
+
+new_case 2 10
+sed -i.bak 's/^iteration: .*/iteration: oops/' "$(STATE)" && rm -f "$(STATE).bak"
+LAST_MSG="Working" run_hook "$WORK/does-not-exist.jsonl"
+check "[corrupted state, hook message] still deletes state" "[[ $RC -eq 0 && ! -e \"\$(STATE)\" && \"\$ERR\" == *'State file corrupted'* ]]"
+
+echo "# a reply that lands during the wait is used"
+
+new_case 2 10
+{ user_prompt "Build a thing"; assistant_tool_use; } > "$WORK/t.jsonl"
+{ cat "$WORK/t.jsonl"; tool_result; assistant_text "Working <promise>DONE</promise>"; } > "$WORK/full.jsonl"
+( sleep 0.6; cp "$WORK/full.jsonl" "$WORK/t.jsonl" ) &
+run_hook "$WORK/t.jsonl"
+wait
+check "[reply lands late, with promise] honoured: completes, deletes state" "[[ $RC -eq 0 && ! -e \"\$(STATE)\" && \"\$OUT\" == *'Detected'* ]]"
+
+new_case 2 10
+{ user_prompt "Build a thing" | sed 's/^{"type":"user"/{"type":"user","promptId":"p1"/'; assistant_tool_use; } > "$WORK/t.jsonl"
+{ cat "$WORK/t.jsonl"; tool_result; assistant_text "Still working"; } > "$WORK/full.jsonl"
+( sleep 0.6; cp "$WORK/full.jsonl" "$WORK/t.jsonl" ) &
+PROMPT_ID=p1 run_hook "$WORK/t.jsonl"
+wait
+check "[reply lands late, no promise] continues and increments" "[[ \$(iteration) == 3 && \$(echo \"\$OUT\" | jq -r .decision) == block ]]"
+
+new_case 2 10
+{ user_prompt "Old" | sed 's/^{"type":"user"/{"type":"user","promptId":"old"/'; assistant_text "Old reply"; } > "$WORK/t.jsonl"
+{ cat "$WORK/t.jsonl"; user_prompt "New" | sed 's/^{"type":"user"/{"type":"user","promptId":"new"/'; assistant_text "New reply <promise>DONE</promise>"; } > "$WORK/full.jsonl"
+( sleep 0.6; cp "$WORK/full.jsonl" "$WORK/t.jsonl" ) &
+PROMPT_ID=new run_hook "$WORK/t.jsonl"
+wait
+check "[new turn lands late] judged on the new reply, not the old one" "[[ $RC -eq 0 && ! -e \"\$(STATE)\" && \"\$OUT\" == *'Detected'* ]]"
 
 echo
 echo "$PASS passed, $FAIL failed"
